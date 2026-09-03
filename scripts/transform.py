@@ -32,7 +32,7 @@ from nodes import ECH_KEYS, INSECURE_KEYS, Node
 # Every node exits here. There were two constants back when plaintext nodes
 # were published alongside TLS ones; rule 9 converts them now, so one address
 # covers everything.
-EXIT_ADDRESS = "172.67.217.240"
+EXIT_ADDRESS = "104.21.33.59"
 
 # --- rules 4-6: port buckets ---------------------------------------------
 PORTS_MAPPED_TO_443 = ("443", "2053", "2083", "2087", "2096", "8443")
