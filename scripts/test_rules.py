@@ -560,11 +560,11 @@ for name, encoded, decoded in (
 check(json.loads(transform.FM) == {
     "tcp": [
         {"type": "fragment", "settings": {
-            "packets": "tlshello", "lengths": ["5", "94", "1"],
+            "packets": "tlshello", "lengths": ["0", "104", "1"],
             "delays": ["0"], "maxSplit": "0"}},
         {"type": "fragment", "settings": {
-            "packets": "1-1", "lengths": ["109", "1"],
-            "delays": ["1"], "maxSplit": "355"}},
+            "packets": "1-1", "lengths": ["114", "1"],
+            "delays": ["1"], "maxSplit": "11"}},
     ]
 }, "constants: fm is the exact fragment specification asked for")
 check(transform.FP == "unsafe", "constants: fp is unsafe")
