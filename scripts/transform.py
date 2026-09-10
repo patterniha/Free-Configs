@@ -52,9 +52,9 @@ from nodes import ECH_KEYS, INSECURE_KEYS, Node
 # names is a separate decision that can be changed without re-testing. Set both
 # pairs to the same values for the old single-endpoint behaviour, which is
 # what they hold today.
-HEALTHCHECK_ADDRESS = "104.21.33.59"
+HEALTHCHECK_ADDRESS = "188.114.97.6"
 HEALTHCHECK_PORT = "443"
-OUTPUT_ADDRESS = "104.21.33.59"
+OUTPUT_ADDRESS = "188.114.97.6"
 OUTPUT_PORT = "443"
 
 # --- rules 4-6: port buckets ---------------------------------------------
