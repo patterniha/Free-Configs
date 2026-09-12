@@ -279,9 +279,10 @@ def preflight_probes() -> list[tuple[str, Node]]:
     what the subscription publishes.
 
     They differ, so both are worth proving. The tested shape carries ``fp`` and
-    ``cs``; the published shape adds ``fm`` and ``dialMode`` on top and points
-    at the output endpoint. Without the second probe an unusable ``fm`` would
-    reach configs.txt unchallenged -- the health check never sees one.
+    ``cs``; each published shape adds one variant's ``fm`` and ``dialMode`` on
+    top and points at the output endpoint. Every variant gets its own probe,
+    because an unusable ``fm`` would otherwise reach configs.txt unchallenged --
+    the health check never sees one.
 
     Both take their address, port and parameter values from transform's own
     constants rather than writing them out again, so repointing an endpoint or
@@ -308,24 +309,30 @@ def preflight_probes() -> list[tuple[str, Node]]:
             params=params,
         )
 
-    published = "fm fragment"
-    if transform.DIAL_MODE:
-        published += " + dialMode sockopt"
-    return [
+    probes = [
         (
             "tested shape (fp=unsafe + cs cipherSuites)",
             probe(transform.HEALTHCHECK_ADDRESS, transform.HEALTHCHECK_PORT),
-        ),
-        (
-            f"published shape (adds {published})",
-            probe(
-                transform.OUTPUT_ADDRESS,
-                transform.OUTPUT_PORT,
-                fm=transform.FM,
-                dialMode=transform.DIAL_MODE,
-            ),
-        ),
+        )
     ]
+    total = len(transform.VARIANTS)
+    for index, variant in enumerate(transform.VARIANTS):
+        carries = "fm fragment" if variant.fm else "no fm"
+        if variant.dial_mode:
+            carries += f" + dialMode {variant.dial_mode}"
+        where = f" {index + 1}/{total}" if total > 1 else ""
+        probes.append(
+            (
+                f"published shape{where} ({carries})",
+                probe(
+                    transform.OUTPUT_ADDRESS,
+                    transform.OUTPUT_PORT,
+                    fm=variant.fm,
+                    dialMode=variant.dial_mode,
+                ),
+            )
+        )
+    return probes
 
 
 def _wait_until_listening(

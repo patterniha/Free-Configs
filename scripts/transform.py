@@ -13,6 +13,8 @@ shape of this whole file:
 * :func:`finalise` runs on the survivors. It adds the parameters that were
   deliberately withheld -- ``fm`` and ``dialMode`` -- and repoints each node at
   the published endpoint, which need not be the one it was tested through.
+  Those two are configured as a list of pairs, and a survivor is published once
+  per pair, so N survivors and I pairs make N * I configs in one file.
 
 The split exists because ``fm`` (finalmask) and ``dialMode`` change *how* the
 connection is made, not *whether* the node carries traffic. Testing without
@@ -40,7 +42,9 @@ NORMALISATION where it happens:
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from typing import NamedTuple
 from urllib.parse import quote, unquote
 
 from nodes import ECH_KEYS, INSECURE_KEYS, Node
@@ -86,10 +90,18 @@ CS_ENCODED = (
 # fm (finalmask) splits the outgoing packets; dialMode selects which dialing
 # code the core runs (streamSettings.sockopt.dialMode, added to the fork in
 # a3261029). Neither decides whether a node carries traffic, so both are
-# withheld from the check and put on the survivors. Set either to "" to publish
-# without it. DIAL_MODE is "" today, and an absent dialMode and dialMode="" are
-# the same thing to the core -- both run the default dialer -- so nothing is
-# emitted for it and nothing is lost by that.
+# withheld from the check and put on the survivors.
+#
+# They travel together as one list of (fm, dialMode) pairs, so a variant is a
+# pair by construction and the two can never drift out of step. Every healthy
+# node is published once per variant, its variants adjacent, so N healthy nodes
+# and I variants become N * I lines -- still one configs.txt and one
+# configs_base64.txt. With a single variant, which is the default, that is one
+# line per node exactly as before.
+#
+# An entry of "" publishes that parameter's default: nothing is written for it.
+# For dialMode that costs nothing, because an absent dialMode and dialMode=""
+# are the same thing to the core -- both run the default dialer.
 #
 # Note what the split costs: a value here is never exercised by the health
 # check. An unusable fm is at least caught by the preflight, which validates
@@ -98,20 +110,30 @@ CS_ENCODED = (
 # it has no code for when it actually dials -- so a dialMode the deployed core
 # does not implement would ship as a list that fails at connect time. Keep it
 # matched to what that build supports.
-FM_ENCODED = (
-    "%7B%22tcp%22%3A%20%5B%7B%22type%22%3A%20%22fragment%22%2C%20%22settings%22%3A%20%7B%22"
-    "packets%22%3A%20%22tlshello%22%2C%20%22lengths%22%3A%20%5B%220%22%2C%20%22104%22%2C%20%22"
-    "1%22%5D%2C%20%22delays%22%3A%20%5B%220%22%5D%2C%20%22maxSplit%22%3A%20%220%22%7D%7D%2C%7B"
-    "%22type%22%3A%20%22fragment%22%2C%20%22settings%22%3A%20%7B%22packets%22%3A%20%221-1%22%2C"
-    "%20%22lengths%22%3A%20%5B%22114%22%2C%20%221%22%5D%2C%20%22delays%22%3A%20%5B%221%22%5D%2C"
-    "%20%22maxSplit%22%3A%20%2211%22%7D%7D%5D%7D"
-)
-DIAL_MODE_ENCODED = ""
+class Variant(NamedTuple):
+    """One published flavour of every healthy node."""
+
+    fm: str
+    dial_mode: str
+
+
+# Add a variant by adding a pair. Each is (fm, dialMode), percent-encoded
+# exactly as it will be emitted; "" for either publishes that one's default.
+VARIANTS_ENCODED = [
+    (
+        "%7B%22tcp%22%3A%20%5B%7B%22type%22%3A%20%22fragment%22%2C%20%22settings%22%3A%20%7B%22"
+        "packets%22%3A%20%22tlshello%22%2C%20%22lengths%22%3A%20%5B%220%22%2C%20%22104%22%2C%20%22"
+        "1%22%5D%2C%20%22delays%22%3A%20%5B%220%22%5D%2C%20%22maxSplit%22%3A%20%220%22%7D%7D%2C%7B"
+        "%22type%22%3A%20%22fragment%22%2C%20%22settings%22%3A%20%7B%22packets%22%3A%20%221-1%22%2C"
+        "%20%22lengths%22%3A%20%5B%22114%22%2C%20%221%22%5D%2C%20%22delays%22%3A%20%5B%221%22%5D%2C"
+        "%20%22maxSplit%22%3A%20%2211%22%7D%7D%5D%7D",
+        "",
+    ),
+]
 
 FP = unquote(FP_ENCODED)
 CS = unquote(CS_ENCODED)
-FM = unquote(FM_ENCODED)
-DIAL_MODE = unquote(DIAL_MODE_ENCODED)
+VARIANTS = [Variant(unquote(fm), unquote(dial_mode)) for fm, dial_mode in VARIANTS_ENCODED]
 
 # The two parameters :func:`finalise` owns, in every spelling. They are removed
 # on the way in and set on the way out, so whatever a source supplied has no
@@ -138,13 +160,53 @@ def _self_check() -> None:
     """Fail loudly at import if a tunable above is unusable, rather than
     silently corrupting configs.txt."""
     for name, encoded, decoded in (
-        ("FM", FM_ENCODED, FM),
         ("CS", CS_ENCODED, CS),
         ("FP", FP_ENCODED, FP),
-        ("DIAL_MODE", DIAL_MODE_ENCODED, DIAL_MODE),
     ):
         if quote(decoded, safe="") != encoded:
             raise AssertionError(f"{name} does not round-trip through percent-encoding")
+
+    # A variant is a (fm, dialMode) pair, so the two can never be different
+    # lengths -- but the list itself, and the shape of each entry, are still
+    # worth checking here rather than as an IndexError deep inside finalise.
+    if not isinstance(VARIANTS_ENCODED, (list, tuple)):
+        raise AssertionError(
+            "VARIANTS_ENCODED must be a list of (fm, dialMode) pairs, not "
+            f"{type(VARIANTS_ENCODED).__name__}"
+        )
+    if not VARIANTS:
+        raise AssertionError("VARIANTS is empty: there would be nothing to publish")
+    for index, entry in enumerate(VARIANTS_ENCODED):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            raise AssertionError(
+                f"VARIANTS_ENCODED[{index}] is not an (fm, dialMode) pair: {entry!r}"
+            )
+
+    for index, (variant, encoded) in enumerate(zip(VARIANTS, VARIANTS_ENCODED)):
+        for field, value, raw in (
+            ("fm", variant.fm, encoded[0]),
+            ("dialMode", variant.dial_mode, encoded[1]),
+        ):
+            name = f"VARIANTS[{index}].{field}"
+            if quote(value, safe="") != raw:
+                raise AssertionError(f"{name} does not round-trip through percent-encoding")
+        # fm is retyped by hand whenever a fragment is tuned, and it is the one
+        # value the health check never exercises -- nodes are tested without it.
+        # Left to the preflight, a JSON typo surfaces as a JSONDecodeError out
+        # of Node.to_outbound rather than as a message about this line.
+        if variant.fm:
+            try:
+                json.loads(variant.fm)
+            except ValueError as error:
+                raise AssertionError(
+                    f"VARIANTS[{index}].fm is not valid JSON: {error}"
+                ) from None
+
+    # Two identical pairs would publish the same link twice, which is the one
+    # thing the rest of this pipeline works hardest to avoid.
+    if len(set(VARIANTS)) != len(VARIANTS):
+        raise AssertionError("VARIANTS repeats a pair, which would publish duplicate configs")
+
     for name, port in (
         ("HEALTHCHECK_PORT", HEALTHCHECK_PORT),
         ("OUTPUT_PORT", OUTPUT_PORT),
@@ -278,19 +340,23 @@ def strip_deferred_params(node: Node) -> None:
             del node.params[key]
 
 
-def apply_deferred_params(node: Node) -> None:
-    """Add fm and dialMode to a node that has already passed the check.
+def apply_deferred_params(node: Node, variant: int = 0) -> None:
+    """Put one variant's fm and dialMode on a node that has already passed.
 
-    An empty constant means "publish without it": nothing is written. For
-    dialMode that is not a compromise -- the core treats an absent dialMode and
+    ``variant`` indexes :data:`VARIANTS`, whose entries are (fm, dialMode)
+    pairs, so the two always travel as the pair they were written as.
+
+    An empty entry means "publish without it": nothing is written. For dialMode
+    that is not a compromise -- the core treats an absent dialMode and
     dialMode="" identically -- and :func:`strip_deferred_params` has already
     guaranteed the node is not carrying a stale value from its source, so an
-    empty constant really does publish the default.
+    empty entry really does publish the default.
     """
-    if FM:
-        node.set("fm", FM)
-    if DIAL_MODE:
-        node.set("dialMode", DIAL_MODE)
+    pair = VARIANTS[variant]
+    if pair.fm:
+        node.set("fm", pair.fm)
+    if pair.dial_mode:
+        node.set("dialMode", pair.dial_mode)
 
 
 # --- rule 12: masking parameters ------------------------------------------
@@ -353,15 +419,26 @@ def source_comment(node: Node) -> str:
     return _OWN_HASH_SUFFIX.sub("", node.tag.strip()).strip()
 
 
-def make_tag(node: Node) -> str:
+def make_tag(node: Node, variant: int = 0) -> str:
     """The published name: the source's own comment, then a short content hash.
 
     The hash comes from :func:`naming_identity`, so the same upstream node
     always gets the same name and an unchanged upstream produces an unchanged
     configs.txt -- including across a change of exit address or masking, and
     across this project re-reading its own output.
+
+    ``variant`` is mixed in so that a node published under several fm/dialMode
+    pairs does not appear in a client several times under one name, which would
+    make the variants impossible to tell apart -- and choosing between them is
+    the point of publishing more than one. The index is mixed in rather than
+    the fm and dialMode values themselves, so that retuning a fragment still
+    does not rename anything. Variant 0 is left unmixed, so a single-variant
+    list produces exactly the names it always has.
     """
-    digest = hashlib.sha256(repr(naming_identity(node)).encode("utf-8")).hexdigest()[:6]
+    seed = repr(naming_identity(node))
+    if variant:
+        seed += f"|variant-{variant}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
     comment = source_comment(node)
     if KEEP_SOURCE_COMMENT and comment:
         head = comment
@@ -448,15 +525,30 @@ def transform(nodes: list[Node], stats: dict | None = None) -> list[Node]:
 def finalise(nodes: list[Node], stats: dict | None = None) -> list[Node]:
     """Turn health-check survivors into what actually gets published.
 
-    Adds the deferred parameters and repoints the nodes at the output endpoint.
-    Mutates in place and returns the same list, so the caller's ordering --
-    fastest first, from the health check -- is preserved.
+    Each node is emitted once per entry in :data:`VARIANTS`, its variants
+    adjacent, so N survivors and I variants produce N * I configs in the order
+
+        node 1 variant 1, node 1 variant 2, node 2 variant 1, ...
+
+    which keeps the caller's ordering -- fastest first, from the health check --
+    and keeps a node's variants together for whoever reads the file.
+
+    Returns new nodes and leaves the input untouched: one survivor can become
+    several published configs, so there is nothing sensible to mutate in place.
     """
     counts: dict = stats if stats is not None else {}
+    published: list[Node] = []
     for node in nodes:
-        apply_deferred_params(node)
-        rule_10_point_at_output(node)
-    counts["published"] = len(nodes)
-    counts["published_with_fm"] = len(nodes) if FM else 0
-    counts["published_with_dial_mode"] = len(nodes) if DIAL_MODE else 0
-    return nodes
+        for variant in range(len(VARIANTS)):
+            copy = node.copy()
+            copy.latency_ms = node.latency_ms   # Node.copy does not carry this
+            apply_deferred_params(copy, variant)
+            rule_10_point_at_output(copy)
+            if RENAME_NODES and len(VARIANTS) > 1:
+                copy.tag = make_tag(copy, variant)
+            published.append(copy)
+    counts["published"] = len(published)
+    counts["published_variants"] = len(VARIANTS)
+    counts["published_with_fm"] = sum(1 for node in published if node.has("fm"))
+    counts["published_with_dial_mode"] = sum(1 for node in published if node.has("dialMode"))
+    return published

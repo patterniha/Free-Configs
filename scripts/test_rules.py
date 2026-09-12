@@ -252,8 +252,8 @@ for spelling in ("fm", "FM", "Fm", "dialMode", "dialmode", "DIALMODE"):
 
 # What a source supplied is replaced by this project's value, never merged.
 for node in transform.finalise(one(**{**BASE, "fm": "junk", "dialMode": "junk"}), {}):
-    check(node.get("fm") == transform.FM, "deferred: the published fm is this project's")
-    check(node.get("dialMode") == transform.DIAL_MODE,
+    check(node.get("fm") == transform.VARIANTS[0].fm, "deferred: the published fm is this project's")
+    check(node.get("dialMode") == transform.VARIANTS[0].dial_mode,
           "deferred: the published dialMode is this project's")
 
 # The invariant the whole split exists for: nothing reaching the health check
@@ -286,17 +286,17 @@ for node in one(**BASE):
     check("fp=unsafe" in emitted, "rule 12: fp is byte-exact in the tested link")
 
 for node in finalised(**BASE):
-    check(node.get("fm") == transform.FM, "rule 12: fm value on a published node")
+    check(node.get("fm") == transform.VARIANTS[0].fm, "rule 12: fm value on a published node")
     check(node.get("fp") == "unsafe" and node.get("cs") == transform.CS,
           "rule 12: finalising leaves fp and cs alone")
     emitted = node.to_link()
-    check(transform.FM_ENCODED in emitted, "rule 12: fm is byte-exact in the published link")
+    check(transform.VARIANTS_ENCODED[0][0] in emitted, "rule 12: fm is byte-exact in the published link")
     check(transform.CS_ENCODED in emitted, "rule 12: cs is byte-exact in the published link")
     check("fp=unsafe" in emitted, "rule 12: fp is byte-exact in the published link")
 
 # A converted plaintext node gets the same masking as any other.
 for node in finalised(security="none", type="ws", host="d.example", path="/", port="8080"):
-    check(node.get("fp") == "unsafe" and node.get("fm") == transform.FM
+    check(node.get("fp") == "unsafe" and node.get("fm") == transform.VARIANTS[0].fm
           and node.get("cs") == transform.CS,
           "rule 12: a converted node is masked like any other")
 
@@ -325,21 +325,21 @@ for node in one(security="tls", type="ws", host="e.example", path="/", port="443
 # Existing values must be overwritten, not kept ("set/change").
 for node in finalised(**{**BASE, "fp": "chrome", "fm": "junk", "cs": "junk"}):
     check(node.get("fp") == "unsafe", "rule 12: existing fp is overwritten")
-    check(node.get("fm") == transform.FM, "rule 12: existing fm is overwritten")
+    check(node.get("fm") == transform.VARIANTS[0].fm, "rule 12: existing fm is overwritten")
 
 # DIAL_MODE is "" today, so nothing should be emitted for it. Both states are
 # patched in, because a test against the live constant asserts nothing about
 # the set case while it is empty -- and the fork will grow more values.
-real_dial = transform.DIAL_MODE
+real_variants = transform.VARIANTS
 try:
-    transform.DIAL_MODE = ""
+    transform.VARIANTS = [transform.Variant(real_variants[0].fm, "")]
     for node in finalised(**BASE):
         check(not node.has("dialMode"), "rule 12: an empty dialMode publishes nothing")
         check("dialMode" not in node.to_link(),
               "rule 12: an empty dialMode is absent from the published link")
         check("sockopt" not in node.to_outbound("t")["streamSettings"],
               "rule 12: an empty dialMode renders no sockopt")
-    transform.DIAL_MODE = "code-1"
+    transform.VARIANTS = [transform.Variant(real_variants[0].fm, "code-1")]
     for node in finalised(**BASE):
         check(node.get("dialMode") == "code-1", "rule 12: a set dialMode reaches the node")
         check("dialMode=code-1" in node.to_link(),
@@ -347,7 +347,135 @@ try:
         check(node.to_outbound("t")["streamSettings"]["sockopt"] == {"dialMode": "code-1"},
               "rule 12: a set dialMode reaches streamSettings.sockopt")
 finally:
-    transform.DIAL_MODE = real_dial
+    transform.VARIANTS = real_variants
+
+# --- published variants ----------------------------------------------------
+# Every healthy node is published once per (fm, dialMode) pair, its variants
+# adjacent, so N survivors and I variants make N * I configs in one file.
+
+
+def set_variants(*pairs: tuple[str, str]) -> None:
+    """Patch VARIANTS and VARIANTS_ENCODED together, so _self_check still has
+    a consistent pair of lists to look at."""
+    transform.VARIANTS_ENCODED = [
+        (quote(fm, safe=""), quote(dial, safe="")) for fm, dial in pairs
+    ]
+    transform.VARIANTS = [transform.Variant(fm, dial) for fm, dial in pairs]
+
+
+def survivors(count: int) -> list[Node]:
+    """`count` distinct transformed nodes, as the health check hands them over."""
+    nodes: list[Node] = []
+    for index in range(count):
+        nodes.extend(one(**{**BASE, "host": f"h{index}.example"}))
+    return nodes
+
+
+real_variants = transform.VARIANTS
+real_variants_encoded = transform.VARIANTS_ENCODED
+try:
+    V1 = ('{"tcp": []}', "")
+    V2 = ('{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello"}}]}', "code-1")
+    V3 = ("", "code-2")
+    set_variants(V1, V2, V3)
+
+    pool = survivors(4)
+    published = transform.finalise(pool, {})
+    check(len(published) == 12, "variants: N survivors x I variants = N*I configs")
+    check([n.host for n in published]
+          == [f"h{i}.example" for i in range(4) for _ in range(3)],
+          "variants: a node's variants are adjacent and the node order is kept")
+    check([n.get("fm") for n in published] == [V1[0], V2[0], V3[0]] * 4,
+          "variants: fm cycles through the list once per node")
+    check([n.get("dialMode") for n in published] == [V1[1], V2[1], V3[1]] * 4,
+          "variants: dialMode stays paired with the fm it was written beside")
+    check(all(not n.has("fm") for n in published[2::3]),
+          "variants: an empty fm entry publishes no fm at all")
+    check(all(not n.has("dialMode") for n in published[0::3]),
+          "variants: an empty dialMode entry publishes no dialMode at all")
+
+    # Variants of one node are the same node: only the deferred pair may differ.
+    def without_deferred(node: Node) -> dict:
+        return {
+            k.lower(): v
+            for k, v in node.params.items()
+            if k.lower() not in transform.DEFERRED_KEYS
+        }
+
+    trio = published[:3]
+    check(without_deferred(trio[0]) == without_deferred(trio[1]) == without_deferred(trio[2]),
+          "variants: variants of one node differ in nothing but fm and dialMode")
+    check(len({(n.scheme, n.uid, n.address, n.port) for n in trio}) == 1,
+          "variants: variants of one node share its identity and endpoint")
+    check(len({n.tag for n in published}) == 12,
+          "variants: every published config gets a name of its own")
+
+    # finalise builds new nodes; one survivor becomes several, so there is
+    # nothing sensible to mutate in place.
+    check(all(not n.has("fm") and not n.has("dialMode") for n in pool),
+          "variants: finalise leaves the nodes it was handed untouched")
+    check(all(n.address == transform.HEALTHCHECK_ADDRESS for n in pool),
+          "variants: finalise does not repoint the nodes it was handed")
+
+    measured = survivors(1)
+    measured[0].latency_ms = 42
+    check([n.latency_ms for n in transform.finalise(measured, {})] == [42, 42, 42],
+          "variants: the measured latency is carried onto every variant")
+
+    stats: dict = {}
+    transform.finalise(survivors(2), stats)
+    check(stats["published"] == 6 and stats["published_variants"] == 3,
+          "variants: the counts describe the expansion")
+    check(stats["published_with_fm"] == 4 and stats["published_with_dial_mode"] == 4,
+          "variants: the counts only count configs that really carry each parameter")
+
+    # A single variant has to behave exactly as the pipeline did before.
+    transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants, real_variants_encoded
+    solo = transform.finalise(survivors(3), {})
+    check(len(solo) == 3, "variants: one variant publishes one config per node")
+    check([n.tag for n in solo]
+          == [one(**{**BASE, "host": f"h{i}.example"})[0].tag for i in range(3)],
+          "variants: one variant leaves the published names exactly as they were")
+
+    # The self-source round trip has to survive the expansion: re-reading a
+    # published file collapses the variants back to one node each -- they
+    # differ only in what strip_deferred_params removes -- and re-expands to
+    # the identical file.
+    set_variants(V1, V2)
+    links = [n.to_link() for n in transform.finalise(survivors(2), {})]
+    check(len(links) == 4, "variants: two variants of two nodes make four links")
+    collapsed = transform.transform([parse_line(line) for line in links], {})
+    check(len(collapsed) == 2,
+          "variants: re-reading the published file collapses back to the nodes")
+    check(all(not n.has("fm") and not n.has("dialMode") for n in collapsed),
+          "variants: a re-read variant carries neither parameter into the next check")
+    check([n.to_link() for n in transform.finalise(collapsed, {})] == links,
+          "variants: and re-expands to exactly the same file")
+
+    # _self_check is where a badly written variant list has to stop.
+    for label, pairs, expected in (
+        ("an empty list", (), "nothing to publish"),
+        ("a repeated pair", (V1, V1), "duplicate"),
+        ("an fm that is not JSON", (("{not json", ""),), "not valid JSON"),
+    ):
+        set_variants(*pairs)
+        try:
+            transform._self_check()
+            check(False, f"variants: _self_check rejects {label}")
+        except AssertionError as error:
+            check(expected in str(error), f"variants: _self_check rejects {label}")
+
+    # An entry that is not a pair at all.
+    transform.VARIANTS_ENCODED = [("only-one-value",)]
+    transform.VARIANTS = [transform.Variant("only-one-value", "")]
+    try:
+        transform._self_check()
+        check(False, "variants: _self_check rejects an entry that is not a pair")
+    except AssertionError as error:
+        check("not an (fm, dialMode) pair" in str(error),
+              "variants: _self_check rejects an entry that is not a pair")
+finally:
+    transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants, real_variants_encoded
 
 # --- naming ----------------------------------------------------------------
 # A published name carries a short content hash so a client can tell two nodes
@@ -379,7 +507,7 @@ for label, overrides in (
     ("the output port", dict(OUTPUT_PORT="8443")),
     ("the cipher list", dict(CS="TLS_AES_128_GCM_SHA256")),
     ("the fingerprint", dict(FP="chrome")),
-    ("fm and dialMode", dict(FM="{}", DIAL_MODE="code-1")),
+    ("fm and dialMode", dict(VARIANTS=[transform.Variant("{}", "code-1")])),
 ):
     check(_name_under(**overrides) == baseline_name,
           f"naming: changing {label} does not rename nodes")
@@ -523,7 +651,7 @@ try:
           "vmess: rules 8 and 10 apply to a vmess node")
     check(vm443.port == transform.OUTPUT_PORT,
           "vmess: a vmess node ends up on the output port like any other")
-    check(vm443.get("fm") == transform.FM and vm443.get("cs") == transform.CS,
+    check(vm443.get("fm") == transform.VARIANTS[0].fm and vm443.get("cs") == transform.CS,
           "vmess: the pipeline sets fm and cs on the node")
 
     # The documented limitation, verified rather than assumed: the vmess wire
@@ -534,7 +662,7 @@ try:
     ).decode("utf-8", "replace"))
     check("fm" not in payload and "cs" not in payload,
           "vmess: the wire format has nowhere to carry fm or cs")
-    check(transform.FM_ENCODED not in vm443.to_link(),
+    check(transform.VARIANTS_ENCODED[0][0] not in vm443.to_link(),
           "vmess: fm really is absent from the emitted link")
     check(payload["tls"] == "tls" and payload["sni"] == "vm.example",
           "vmess: what the format can carry is still carried")
@@ -546,18 +674,20 @@ finally:
 
 # --- masking constants round trip ------------------------------------------
 
-for name, encoded, decoded in (
-    ("FM", transform.FM_ENCODED, transform.FM),
+constant_pairs = [
     ("CS", transform.CS_ENCODED, transform.CS),
     ("FP", transform.FP_ENCODED, transform.FP),
-    ("DIAL_MODE", transform.DIAL_MODE_ENCODED, transform.DIAL_MODE),
-):
+]
+for _i, (_v, _e) in enumerate(zip(transform.VARIANTS, transform.VARIANTS_ENCODED)):
+    constant_pairs.append((f"VARIANTS[{_i}].fm", _e[0], _v.fm))
+    constant_pairs.append((f"VARIANTS[{_i}].dial_mode", _e[1], _v.dial_mode))
+for name, encoded, decoded in constant_pairs:
     check(quote(decoded, safe="") == encoded, f"constants: {name} survives a decode/encode cycle")
 
 # The round trip above only proves the constants are self-consistent -- it
 # compares each one against itself, so a wrong value round-trips just as
 # happily as a right one. These pin what the values actually have to be.
-check(json.loads(transform.FM) == {
+check(json.loads(transform.VARIANTS[0].fm) == {
     "tcp": [
         {"type": "fragment", "settings": {
             "packets": "tlshello", "lengths": ["0", "104", "1"],
@@ -913,7 +1043,7 @@ check((tested_probe.address, tested_probe.port)
       == (transform.HEALTHCHECK_ADDRESS, transform.HEALTHCHECK_PORT),
       "healthcheck: the tested probe uses the real health-check endpoint")
 
-check(published_probe.get("fm") == transform.FM,
+check(published_probe.get("fm") == transform.VARIANTS[0].fm,
       "healthcheck: the published probe carries the real fm value")
 check(published_probe.get("fp") == transform.FP
       and published_probe.get("cs") == transform.CS,
@@ -936,9 +1066,9 @@ check("finalmask" not in rendered, "healthcheck: the tested probe renders no fin
 
 # A dialMode has to be validated too once one is set, and only on the shape
 # that carries it.
-real_dial = transform.DIAL_MODE
+real_variants = transform.VARIANTS
 try:
-    transform.DIAL_MODE = "code-1"
+    transform.VARIANTS = [transform.Variant(real_variants[0].fm, "code-1")]
     dial_probes = healthcheck.preflight_probes()
     check("dialMode" in dial_probes[1][0],
           "healthcheck: a set dialMode is named in the published probe's description")
@@ -952,7 +1082,33 @@ try:
     check('"dialMode": "code-1"' in rendered,
           "healthcheck: the published probe renders the dialMode sockopt")
 finally:
-    transform.DIAL_MODE = real_dial
+    transform.VARIANTS = real_variants
+
+# Every variant needs a probe of its own. fm is the one value the health check
+# never exercises, so this is the only place the core ever sees one -- probing
+# just the first would let a bad second variant reach configs.txt unchallenged.
+real_variants = transform.VARIANTS
+try:
+    transform.VARIANTS = [
+        transform.Variant('{"tcp": []}', ""),
+        transform.Variant('{"tcp": [{"type": "fragment", "settings": {}}]}', "code-1"),
+        transform.Variant("", "code-2"),
+    ]
+    many = healthcheck.preflight_probes()
+    check(len(many) == 4,
+          "healthcheck: the preflight probes the tested shape plus every variant")
+    check([node.get("fm") for _, node in many[1:]]
+          == [variant.fm for variant in transform.VARIANTS],
+          "healthcheck: each published probe carries its own variant's fm")
+    check([node.get("dialMode") for _, node in many[1:]]
+          == [variant.dial_mode for variant in transform.VARIANTS],
+          "healthcheck: each published probe carries its own variant's dialMode")
+    check("1/3" in many[1][0] and "3/3" in many[3][0],
+          "healthcheck: the probe descriptions number the variants")
+    check(not many[0][1].has("fm") and not many[0][1].has("dialMode"),
+          "healthcheck: the tested probe is unaffected by how many variants there are")
+finally:
+    transform.VARIANTS = real_variants
 
 
 # Endpoint selection and the pass/fail decision inside _probe. Both are stubbed
@@ -1278,9 +1434,9 @@ emitted = [l for l in produced.splitlines() if l and not l.startswith("#")]
 check(completed.returncode == 0 and len(emitted) == 1,
       "finalise: the build publishes the one node it was given")
 published = parse_line(emitted[0])
-check(published.get("fm") == transform.FM,
+check(published.get("fm") == transform.VARIANTS[0].fm,
       "finalise: build.py adds fm to what it publishes")
-check(transform.FM_ENCODED in emitted[0],
+check(transform.VARIANTS_ENCODED[0][0] in emitted[0],
       "finalise: the published fm is byte-exact in configs.txt")
 check(published.get("fp") == transform.FP and published.get("cs") == transform.CS,
       "finalise: build.py keeps the masking the health check ran with")

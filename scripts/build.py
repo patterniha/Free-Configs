@@ -234,7 +234,13 @@ def render(links: list[str], counts: dict, sources: list[str]) -> str:
         f"#profile-title: {PROFILE_TITLE}",
         f"#profile-update-interval: {UPDATE_INTERVAL_DAYS}",
         f"#profile-web-page-url: {PROFILE_PAGE}",
-        f"# {len(links)} nodes, from {counts.get('final_total', 0)} tested",
+        (
+            f"# {len(links)} configs from {len(links) // counts['published_variants']} healthy nodes"
+            f" x {counts['published_variants']} fm/dialMode variants,"
+            f" tested from {counts.get('final_total', 0)}"
+            if counts.get("published_variants", 1) > 1
+            else f"# {len(links)} nodes, from {counts.get('final_total', 0)} tested"
+        ),
         f"# generated {stamp} from {len(sources)} source(s):",
         *(f"#   {url}" for url in sources),
         f"# criterion: a real proxied request succeeded in all"
@@ -386,20 +392,18 @@ def main() -> int:
 
     # Only now do the survivors become publishable links: fm and dialMode were
     # withheld so the health check measured the nodes rather than the masking,
-    # and the output endpoint is a separate setting from the tested one.
-    transform.finalise(healthy, counts)
-    extras = [
-        name
-        for name, value in (("fm", transform.FM), ("dialMode", transform.DIAL_MODE))
-        if value
-    ]
+    # and the output endpoint is a separate setting from the tested one. One
+    # survivor becomes one config per FM/DIAL_MODE pair, so this is also where
+    # the published list can grow past the number of nodes tested.
+    published = transform.finalise(healthy, counts)
+    variants = counts.get("published_variants", 1)
     print(
-        f"Finalising {len(healthy)} nodes: "
-        + (f"adding {' and '.join(extras)}, " if extras else "")
-        + f"publishing on {transform.OUTPUT_ADDRESS}:{transform.OUTPUT_PORT}"
+        f"Finalising {len(healthy)} healthy nodes"
+        + (f" x {variants} fm/dialMode variants = {len(published)} configs" if variants > 1 else "")
+        + f", publishing on {transform.OUTPUT_ADDRESS}:{transform.OUTPUT_PORT}"
     )
 
-    links = [node.to_link() for node in healthy]
+    links = [node.to_link() for node in published]
     output_path = os.path.join(OUTPUT_DIR, OUTPUT_FILE)
     base64_path = os.path.join(OUTPUT_DIR, OUTPUT_FILE_BASE64)
 
