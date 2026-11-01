@@ -54,6 +54,12 @@ UPDATE_INTERVAL_DAYS = 1
 FETCH_ATTEMPTS = 4
 FETCH_TIMEOUT = 45
 
+# The oldest patterniha/Xray-core release that runs everything the shipped
+# variants publish: v26.10.27 added the merge mask and the oob dialMode, and
+# v26.6.22 the fragment's lengths/delays arrays. Raise it when a variant comes
+# to need something newer; CI always runs the newest release regardless.
+MIN_XRAY_VERSION = "v26.10.27"
+
 # Transient fetch failures worth another attempt. http.client.HTTPException is
 # here for IncompleteRead and BadStatusLine, which are not OSError subclasses:
 # a truncated response is the most likely partial-data failure, and without it
@@ -216,8 +222,8 @@ def locate_xray() -> str:
             return candidate
     raise SystemExit(
         "Xray-core binary not found. Set XRAY_BIN, or place it at bin/xray. "
-        "v26.6.22 or newer is required: earlier builds reject the fragment "
-        "'lengths'/'delays' arrays used by the fm parameter."
+        f"patterniha/Xray-core {MIN_XRAY_VERSION} or newer is required: earlier "
+        "builds lack masks and dial modes the published variants use."
     )
 
 
@@ -377,7 +383,7 @@ def main() -> int:
                 print(f"  - {item}", file=sys.stderr)
             print(
                 "Use a build of https://github.com/patterniha/Xray-core based on"
-                " v26.6.22 or newer.",
+                f" {MIN_XRAY_VERSION} or newer.",
                 file=sys.stderr,
             )
             return 1

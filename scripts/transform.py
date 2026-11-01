@@ -233,19 +233,24 @@ VARIANTS_ENCODED = [
         # cs
         "",
     ),
-    # On a Cloudflare IPv6 address, without a fragment or a cipher list,
-    # imitating Chrome's ClientHello.
+    # On a Cloudflare IPv6 address, imitating Chrome 120's ClientHello,
+    # without a cipher list. dialMode oob.0 sends the first write with a 0x00
+    # byte appended, as TCP urgent (out-of-band) data, and the merge mask holds
+    # writes back to send them together -- after 30 ms without a new one, or
+    # at 16 KiB -- for the first 100 sends. Both need patterniha/Xray-core
+    # v26.10.27 or newer.
     (
         # prefix_name
-        "IPv6",
+        "IPv6 oob",
         # ip
         "2a06:98c1:3101::6812:202f",
         # port
         "443",
         # fm
-        "",
+        "%7B%22tcp%22%3A%20%5B%7B%22type%22%3A%20%22merge%22%2C%20%22settings%22%3A%20%7B%22times%22"
+        "%3A%20100%2C%20%22delayMs%22%3A%2030%2C%20%22maxBytes%22%3A%2016384%7D%7D%5D%7D",
         # dialMode
-        "",
+        "oob.0",
         # security
         "tls",
         # ech
@@ -253,7 +258,7 @@ VARIANTS_ENCODED = [
         # echOutbound
         "",
         # fp
-        "chrome",
+        "hellochrome_120",
         # cs
         "",
     ),

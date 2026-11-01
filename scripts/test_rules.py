@@ -1791,6 +1791,28 @@ try:
           "healthcheck: each published probe carries its own variant's dialMode")
     check("1/3" in many[1][0] and "3/3" in many[3][0],
           "healthcheck: the probe descriptions number the variants")
+    # And name the masks each fm holds, so a refused one points at the right
+    # kind -- a merge mask is not a fragment.
+    for fm, label in (
+        ("", "no fm"),
+        ('{"tcp": [{"type": "fragment", "settings": {}}, {"type": "fragment", "settings": {}}]}',
+         "fm fragment"),
+        ('{"tcp": [{"type": "merge", "settings": {"times": 100}}]}', "fm merge"),
+        ('{"tcp": [{"type": "fragment"}, {"type": "merge"}], "udp": [{"type": "noise"}]}',
+         "fm fragment+merge+noise"),
+        ('{"tcp": []}', "fm"),
+        ("[1]", "fm"),
+    ):
+        check(healthcheck._fm_label(fm) == label,
+              f"healthcheck: an fm of {fm[:44]!r} is described as {label!r}")
+    check(f"({transform.VARIANTS[1].security} + fm fragment + " in many[2][0],
+          "healthcheck: a published probe's description names its fm's masks")
+    listed = transform.VARIANTS
+    transform.VARIANTS = [transform.Variant(*entry(fm='{"tcp": [{"type": "merge", "settings": {}}]}'))]
+    merge_probe = healthcheck.preflight_probes()[1][0]
+    transform.VARIANTS = listed
+    check("(tls + fm merge)" in merge_probe,
+          "healthcheck: a probe whose fm is a merge mask is described as one, not as a fragment")
     check(not any(many[0][1].has(key) for key in transform.VARIANT_KEYS),
           "healthcheck: the tested probe is unaffected by how many variants there are")
     check([node.get("ech") for _, node in many[1:]]
@@ -2334,7 +2356,7 @@ try:
             build.locate_xray()
             check(False, "locate: absent core is reported")
         except SystemExit as error:
-            check("v26.6.22" in str(error) and "XRAY_BIN" in str(error),
+            check(build.MIN_XRAY_VERSION in str(error) and "XRAY_BIN" in str(error),
                   "locate: absent core names both the fix and the version floor")
     finally:
         build.shutil.which = _real_which

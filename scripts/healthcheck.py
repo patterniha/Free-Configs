@@ -245,9 +245,11 @@ def preflight(xray: str) -> list[str]:
     same config shape the health check builds, so a core that accepts these
     accepts the real thing.
 
-    ``cs`` maps to Xray's ``cipherSuites``, which is undocumented, and the
-    ``fm`` fragment's ``lengths``/``delays`` arrays only exist in cores based on
-    v26.6.22 or newer -- both are worth proving rather than assuming.
+    ``cs`` maps to Xray's ``cipherSuites``, which is undocumented, and ``fm``
+    masks are newer than most cores -- the fragment's ``lengths``/``delays``
+    arrays need v26.6.22, the merge mask v26.10.27 -- all worth proving rather
+    than assuming. A dialMode is not proven here: the core takes any at load
+    and only refuses one it has no code for when it dials.
     """
     try:
         version = subprocess.run(
@@ -288,6 +290,25 @@ def _preflight_config(node: Node) -> dict:
     if ech_outbound is not None:
         config["outbounds"].append(ech_outbound)
     return config
+
+
+def _fm_label(fm: str) -> str:
+    """An fm as a probe's description names it: by the types of its masks, in
+    the order given -- "fm fragment", "fm merge" -- or "no fm"."""
+    if not fm:
+        return "no fm"
+    try:
+        layers = json.loads(fm)
+    except ValueError:
+        return "fm"
+    if not isinstance(layers, dict):
+        return "fm"
+    types = [
+        mask["type"]
+        for masks in layers.values() if isinstance(masks, list)
+        for mask in masks if isinstance(mask, dict) and isinstance(mask.get("type"), str)
+    ]
+    return "fm " + "+".join(dict.fromkeys(types)) if types else "fm"
 
 
 def preflight_probes() -> list[tuple[str, Node]]:
@@ -336,7 +357,7 @@ def preflight_probes() -> list[tuple[str, Node]]:
     ]
     total = len(transform.VARIANTS)
     for index, variant in enumerate(transform.VARIANTS):
-        carries = [variant.security, "fm fragment" if variant.fm else "no fm"]
+        carries = [variant.security, _fm_label(variant.fm)]
         if variant.dial_mode:
             carries.append(f"dialMode {variant.dial_mode}")
         if variant.ech:
