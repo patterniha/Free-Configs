@@ -48,3 +48,4 @@ https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub
 https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/vless
 https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt
 https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt
+https://raw.githubusercontent.com/HnCgs/HomayounConfigs/refs/heads/main/configs.txt
