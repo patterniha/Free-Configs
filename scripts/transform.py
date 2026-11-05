@@ -243,7 +243,7 @@ VARIANTS_ENCODED = [
         # prefix_name
         "IPv6 oob",
         # ip
-        "2a06:98c1:3101::6812:202f",
+        "2a06:98c1:3120::7",
         # port
         "443",
         # fm
