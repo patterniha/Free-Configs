@@ -69,6 +69,8 @@ REFERENCE_VARIANT = transform.Variant(
         "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:"
         "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
     ),
+    cp="",
+    esr="",
 )
 
 
@@ -309,7 +311,8 @@ check(len(survivor) == 1, "deferred: stripping ech does not drop the node")
 # whether a node carries traffic. None of them may reach the health check.
 
 for spelling in ("fm", "FM", "Fm", "dialMode", "dialmode", "DIALMODE",
-                 "ech", "ECH", "Ech", "echOutbound", "echoutbound", "ECHOUTBOUND"):
+                 "ech", "ECH", "Ech", "echOutbound", "echoutbound", "ECHOUTBOUND",
+                 "cp", "CP", "Cp", "esr", "ESR", "Esr"):
     tested = one(**{**BASE, spelling: "junk-from-a-source"})
     check(len(tested) == 1, f"deferred: a node carrying {spelling} is not dropped")
     for node in tested:
@@ -327,13 +330,13 @@ for node in transform.finalise(one(**{**BASE, "fm": "junk", "dialMode": "junk"})
 # The invariant the whole split exists for: nothing reaching the health check
 # carries any of the four, whatever it arrived with, and everything reaching
 # it still carries the masking the check is supposed to exercise.
-SOURCE_DEFERRED = {"fm": "x", "dialMode": "x", "ech": "x", "echOutbound": "x"}
+SOURCE_DEFERRED = {"fm": "x", "dialMode": "x", "ech": "x", "echOutbound": "x", "cp": "x", "esr": "1"}
 matrix = []
 for security, port in (("tls", "443"), ("none", "8080"), ("tls", "2053"), ("none", "2082")):
     for extra in ({}, {"fm": "x"}, {"dialMode": "x"}, {"ech": "x"}, {"echOutbound": "x"},
-                  SOURCE_DEFERRED):
+                  {"cp": "X25519"}, {"esr": "1"}, SOURCE_DEFERRED):
         matrix.extend(one(**{**BASE, "security": security, "port": port, **extra}))
-check(len(matrix) == 24, "deferred: every combination in the matrix survived the rules")
+check(len(matrix) == 32, "deferred: every combination in the matrix survived the rules")
 check(all(not n.has(key) for n in matrix for key in transform.VARIANT_KEYS),
       "deferred: no node reaches the health check carrying fm, dialMode, ech or echOutbound")
 check(all(not parse_line(n.to_link()).has(key) for n in matrix for key in transform.VARIANT_KEYS),
@@ -349,6 +352,9 @@ check(all(not n.has("fp") and not n.has("cs") for n in matrix),
 check(all("fingerprint" not in st["tlsSettings"] and "cipherSuites" not in st["tlsSettings"]
           for st in tested_stream),
       "deferred: no tested outbound renders a fingerprint or cipherSuites")
+check(all("curvePreferences" not in st["tlsSettings"]
+          and "enableSessionResumption" not in st["tlsSettings"] for st in tested_stream),
+      "deferred: no tested outbound renders curvePreferences or enableSessionResumption")
 check(all(n.port == transform.HEALTHCHECK_PORT and n.security == "tls" for n in matrix),
       "deferred: every tested node is TLS on the health-check port")
 
@@ -524,7 +530,8 @@ try:
     # the wrong place cannot line up with the right value by accident: three
     # endpoints (IPv4, an alternate Cloudflare port, IPv6), and the third
     # published without TLS.
-    V1 = entry(fm='{"tcp": []}', fp="unsafe", cs="TLS_AES_256_GCM_SHA384")
+    V1 = entry(fm='{"tcp": []}', fp="unsafe", cs="TLS_AES_256_GCM_SHA384",
+               cp="X25519MLKEM768,X25519", esr="1")
     V2 = entry(ip="104.16.0.1", port="2053",
                fm='{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello"}}]}',
                dial_mode="code-1", ech=ECH_DNS, ech_outbound=ECH_OUT, fp="chrome",
@@ -547,10 +554,12 @@ try:
     check([(n.address, n.port) for n in published] == [(v.ip, v.port) for v in VARIANTS3] * 4,
           "variants: each variant of a node is published on its own ip and port")
     check(all(not n.has(key) for n in published[2::3]
-              for key in ("fm", "ech", "echOutbound", "fp", "cs")),
+              for key in ("fm", "ech", "echOutbound", "fp", "cs", "cp", "esr")),
           "variants: empty parameter fields publish nothing")
     check(all(not n.has(key) for n in published[0::3] for key in ("dialMode", "ech", "echOutbound")),
           "variants: empty dialMode, ech and echOutbound fields publish nothing")
+    check(all(not n.has(key) for n in published[1::3] for key in ("cp", "esr")),
+          "variants: empty cp and esr fields publish nothing")
 
     # A plaintext copy drops what only exists inside TLS; a TLS copy keeps it.
     check(all(not n.has("sni") and not n.has("alpn") for n in published[2::3]),
@@ -562,6 +571,30 @@ try:
     check(plain_stream["security"] == "none" and "tlsSettings" not in plain_stream,
           "variants: a security=none copy renders a plaintext outbound")
     check("security=none" in published[2].to_link(), "variants: and says so in its link")
+
+    # cp and esr as both clients read them: cp's names joined by a comma that the
+    # link percent-encodes, as it does alpn's, and esr=1; right after cs, as
+    # PattN's own share links and QR-code JSON have them.
+    curved = published[0].to_link()
+    check("&cp=X25519MLKEM768%2CX25519&" in curved and "&esr=1&" in curved,
+          "variants: cp and esr are byte-exact in the published link")
+    check(curved.index("&cs=") < curved.index("&cp=") < curved.index("&esr=") < curved.index("&fm="),
+          "variants: cp and esr follow cs in the published link")
+    curved_tls = published[0].to_outbound("t")["streamSettings"]["tlsSettings"]
+    check(curved_tls.get("curvePreferences") == ["X25519MLKEM768", "X25519"],
+          "variants: cp renders tlsSettings.curvePreferences as a list of names")
+    check(curved_tls.get("enableSessionResumption") is True,
+          "variants: esr=1 renders tlsSettings.enableSessionResumption as true")
+    plain_tls = published[1].to_outbound("t")["streamSettings"]["tlsSettings"]
+    check("curvePreferences" not in plain_tls and "enableSessionResumption" not in plain_tls,
+          "variants: without cp or esr, neither is rendered")
+    spaced = Node("vless", "u", "a", "443", {"security": "tls", "cp": "x25519mlkem768, x25519 ,"})
+    check(spaced.to_outbound("t")["streamSettings"]["tlsSettings"]["curvePreferences"]
+          == ["x25519mlkem768", "x25519"],
+          "variants: cp's names are trimmed and empty ones left out, as the clients do")
+    check("enableSessionResumption" not in Node("vless", "u", "a", "443", {"security": "tls", "esr": "0"})
+          .to_outbound("t")["streamSettings"]["tlsSettings"],
+          "variants: an esr other than 1 renders no session resumption, as the clients read it")
 
     # Variants of one node are the same node: only what a variant sets differs.
     def not_set_by_variant(node: Node) -> dict:
@@ -580,13 +613,14 @@ try:
     # exact-case map lookup -- so a source's own casing must not survive into
     # the published link, even though it was stripped case-insensitively.
     shouting = one(**{**BASE, "host": "hs.example", "ECH": "x", "ECHOUTBOUND": "y",
-                      "DIALMODE": "z", "FM": "w", "FP": "v", "CS": "u"})
-    emitted = transform.finalise(shouting, {})[1].to_link()
+                      "DIALMODE": "z", "FM": "w", "FP": "v", "CS": "u", "CP": "t", "ESR": "s"})
+    # Every copy at once: each key is set by at least one of the variants.
+    emitted = " ".join(n.to_link() for n in transform.finalise(shouting, {}))
     # Pinned literally: every other check reads VARIANT_KEYS itself, so a
     # misspelling there would be checked against the misspelling.
-    CLIENT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs")
+    CLIENT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs", "cp", "esr")
     check(transform.VARIANT_KEYS == CLIENT_KEYS,
-          "variants: the six keys are spelled exactly as PattN and PattNG read them")
+          "variants: the eight keys are spelled exactly as PattN and PattNG read them")
     for key in CLIENT_KEYS:
         check(f"&{key}=" in emitted, f"variants: {key} is emitted under its exact spelling")
     check(not any(f"&{key.upper()}=" in emitted for key in transform.VARIANT_KEYS),
@@ -608,7 +642,7 @@ try:
     transform.finalise(survivors(2), stats)
     check(stats["published"] == 6 and stats["published_variants"] == 3,
           "variants: the counts describe the expansion")
-    check([stats[f"published_with_{key}"] for key in transform.VARIANT_KEYS] == [4, 4, 2, 2, 4, 4],
+    check([stats[f"published_with_{key}"] for key in transform.VARIANT_KEYS] == [4, 4, 2, 2, 4, 4, 2, 2],
           "variants: the counts only count configs that really carry each field")
     check(stats["published_without_tls"] == 2, "variants: plaintext copies are counted")
 
@@ -707,6 +741,21 @@ try:
         ("a prefix_name with a tab", (entry(prefix_name="F\tF"),), "control character"),
         ("two entries differing only in prefix_name",
          (entry(prefix_name="F&F"), entry(prefix_name="ECH")), "duplicate"),
+        # cp, which the core trims as quietly as cs, and applies under Go's own TLS alone
+        ("a cp naming a curve the core does not know", (entry(fp="unsafe", cp="X25519,X448"),),
+         "does not know"),
+        ("a cp written with cs's colons", (entry(fp="unsafe", cp="X25519MLKEM768:X25519"),),
+         "does not know"),
+        ("a cp with an empty name", (entry(fp="unsafe", cp="X25519,"),), "does not know"),
+        ("a cp naming a curve twice", (entry(fp="unsafe", cp="X25519,x25519"),), "twice"),
+        ("a cp under the chrome fingerprint", (entry(fp="chrome", cp="X25519"),), "needs fp=unsafe"),
+        ("a cp under an empty fingerprint, which is Chrome's", (entry(cp="X25519"),),
+         "needs fp=unsafe"),
+        ("none with a cp", (entry(security="none", port="8080", cp="X25519"),), "inside TLS"),
+        # esr, of which both clients read "1" alone as on
+        ("an esr of true", (entry(esr="true"),), "has to be"),
+        ("an esr of 0", (entry(esr="0"),), "has to be"),
+        ("none with an esr", (entry(security="none", port="8080", esr="1"),), "inside TLS"),
     ):
         set_variants(*entries)
         try:
@@ -739,6 +788,14 @@ try:
         ("an emoji joined by a zero-width joiner", (entry(prefix_name="🏳️‍🌈"),)),
         ("two variants sharing a prefix_name",
          (entry(prefix_name="IPv6"), entry(prefix_name="IPv6", ip="104.16.0.1"))),
+        ("a cp of the curves both clients offer", (entry(fp="unsafe", cp="X25519MLKEM768,X25519"),)),
+        ("a cp of every curve the core knows",
+         (entry(fp="unsafe", cp="CurveP256,CurveP384,CurveP521,X25519,X25519MLKEM768,"
+                                "SecP256r1MLKEM768,SecP384r1MLKEM1024"),)),
+        ("a cp in lower case, spaced after its commas", (entry(fp="unsafe", cp="x25519mlkem768, x25519"),)),
+        ("a cp under fp=UNSAFE in capitals", (entry(fp="UNSAFE", cp="X25519"),)),
+        ("an esr of 1", (entry(esr="1"),)),
+        ("an esr under a uTLS fingerprint", (entry(fp="chrome", esr="1"),)),
     ]
     for port in transform.PORTS_MAPPED_TO_8080:
         accepted_cases.append((f"none on Cloudflare HTTP port {port}",
@@ -751,7 +808,7 @@ try:
         except AssertionError as error:
             check(False, f"variants: _self_check accepts {label} ({error})")
 
-    # Entries that are not ten strings at all -- including every shape the
+    # Entries that are not twelve strings at all -- including every shape the
     # list has had before, so an old entry pasted back in is refused clearly.
     for label, bad in (
         ("an entry of the old two-field shape", ("{}", "")),
@@ -759,7 +816,8 @@ try:
         ("an entry of the old six-field shape", ("{}", "", "", "", "unsafe", "")),
         ("an entry of the old eight-field shape",
          ("188.114.98.0", "443", "{}", "", "", "", "unsafe", "")),
-        ("an entry of the old nine-field shape, without a prefix_name", entry()[1:]),
+        ("an entry of the old nine-field shape, without a prefix_name", entry()[1:-2]),
+        ("an entry of the old ten-field shape, without cp and esr", entry()[:-2]),
         ("an entry with a field that is not a string", entry()[:5] + (None,) + entry()[6:]),
         ("an entry with a port that is not a string",
          tuple(443 if field == "port" else value
@@ -770,8 +828,8 @@ try:
             transform._self_check()
             check(False, f"variants: _self_check rejects {label}")
         except AssertionError as error:
-            check("not a (prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs)"
-                  " entry" in str(error), f"variants: _self_check rejects {label}")
+            check("not a (prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs,"
+                  " cp, esr) entry" in str(error), f"variants: _self_check rejects {label}")
 finally:
     transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants, real_variants_encoded
 
@@ -1034,6 +1092,7 @@ for label, overrides in (
         fp="chrome", cs="TLS_AES_128_GCM_SHA256")])),
     ("ech and echOutbound", dict(VARIANTS=[transform.VARIANTS[0]._replace(
         ech="x+https://1.1.1.1/dns-query", ech_outbound='{"tag": "ech-out", "protocol": "freedom"}')])),
+    ("cp and esr", dict(VARIANTS=[transform.VARIANTS[0]._replace(cp="X25519MLKEM768,X25519", esr="1")])),
 ):
     check(_name_under(**overrides) == baseline_name,
           f"naming: changing {label} does not rename nodes")
@@ -1771,7 +1830,8 @@ finally:
 real_variants = transform.VARIANTS
 try:
     transform.VARIANTS = [
-        transform.Variant(*entry(fm='{"tcp": []}', fp="unsafe", cs="TLS_AES_256_GCM_SHA384")),
+        transform.Variant(*entry(fm='{"tcp": []}', fp="unsafe", cs="TLS_AES_256_GCM_SHA384",
+                                 cp="X25519MLKEM768,X25519", esr="1")),
         transform.Variant(*entry(ip="104.16.0.1", port="2053",
                                  fm='{"tcp": [{"type": "fragment", "settings": {}}]}',
                                  dial_mode="code-1", ech="x+https://1.1.1.1/dns-query",
@@ -1824,6 +1884,12 @@ try:
     check([(node.get("fp"), node.get("cs")) for _, node in many[1:]]
           == [(variant.fp, variant.cs) for variant in transform.VARIANTS],
           "healthcheck: each published probe carries its own variant's fp and cs")
+    check([(node.get("cp"), node.get("esr")) for _, node in many[1:]]
+          == [(variant.cp, variant.esr) for variant in transform.VARIANTS],
+          "healthcheck: each published probe carries its own variant's cp and esr")
+    check("cp X25519MLKEM768,X25519 + esr" in many[1][0]
+          and "cp " not in many[2][0] and "esr" not in many[2][0],
+          "healthcheck: a probe's description names its curves and session resumption")
     check([(node.address, node.port) for _, node in many[1:]]
           == [(variant.ip, variant.port) for variant in transform.VARIANTS],
           "healthcheck: each published probe points at its own variant's endpoint")
@@ -1833,7 +1899,7 @@ try:
     check("104.16.0.1:2053" in many[2][0],
           "healthcheck: a probe's description names its endpoint")
     check("ech" in many[2][0] and "echOutbound" in many[2][0] and "echOutbound" not in many[3][0],
-          "healthcheck: a probe's description says which of the six it carries")
+          "healthcheck: a probe's description says which of the eight it carries")
     check("fp chrome" in many[2][0] and "fp" not in many[3][0],
           "healthcheck: a probe's description names its fingerprint")
     check(many[3][1].get("security") == "none"

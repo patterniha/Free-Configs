@@ -43,6 +43,8 @@ PARAM_ORDER = (
     "alpn",
     "fp",
     "cs",
+    "cp",
+    "esr",
     "fm",
     "dialMode",
     "ech",
@@ -223,12 +225,13 @@ class Node:
         """Render this node as an Xray-core outbound object.
 
         Mirrors whatever the node carries, including the share-link extensions
-        ``fp`` (fingerprint), ``cs`` (cipherSuites), ``fm`` (finalmask),
-        ``dialMode`` (a sockopt), ``ech`` (echConfigList) and ``echOutbound``
-        (the echSockopt dialer). Which are present depends on the stage: the
-        health check runs on nodes carrying none of the six, over the core's
-        plain TLS, and transform.finalise adds them to the survivors. See scripts/transform.py for why the pipeline is split that
-        way.
+        ``fp`` (fingerprint), ``cs`` (cipherSuites), ``cp`` (curvePreferences),
+        ``esr`` (enableSessionResumption), ``fm`` (finalmask), ``dialMode`` (a
+        sockopt), ``ech`` (echConfigList) and ``echOutbound`` (the echSockopt
+        dialer). Which are present depends on the stage: the health check runs
+        on nodes carrying none of the eight, over the core's plain TLS, and
+        transform.finalise adds them to the survivors. See scripts/transform.py
+        for why the pipeline is split that way.
         """
         net = self.transport
         stream: dict = {"network": "ws" if net in WS_ALIASES else net}
@@ -243,6 +246,14 @@ class Node:
                 tls["fingerprint"] = self.get("fp")
             if self.get("cs"):
                 tls["cipherSuites"] = self.get("cs")
+            if self.get("cp"):
+                # As both clients pass it: the names split on "," and trimmed.
+                tls["curvePreferences"] = [
+                    name.strip() for name in self.get("cp").split(",") if name.strip()
+                ]
+            if self.get("esr") == "1":
+                # "1" is the only value either client reads as on.
+                tls["enableSessionResumption"] = True
             if self.get("alpn"):
                 tls["alpn"] = [a for a in self.get("alpn").split(",") if a]
             if self.get("ech"):

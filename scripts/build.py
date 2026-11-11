@@ -57,7 +57,8 @@ FETCH_TIMEOUT = 45
 # The oldest patterniha/Xray-core release that runs everything the shipped
 # variants publish: v26.10.27 added the merge mask and the oob dialMode, and
 # v26.6.22 the fragment's lengths/delays arrays. Raise it when a variant comes
-# to need something newer; CI always runs the newest release regardless.
+# to need something newer -- esr under any fingerprint but unsafe needs
+# v26.11.9 -- though CI always runs the newest release regardless.
 MIN_XRAY_VERSION = "v26.10.27"
 
 # Transient fetch failures worth another attempt. http.client.HTTPException is

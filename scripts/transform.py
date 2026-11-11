@@ -9,20 +9,20 @@ shape of this whole file:
   health-check endpoint (rule 10), strips what must not be tested (rule 11 and
   :func:`strip_deferred_params`) and sets the SNI Cloudflare routes on.
 
-* :func:`finalise` runs on the survivors. It adds the six parameters that were
-  deliberately withheld -- ``fm``, ``dialMode``, ``ech``, ``echOutbound``,
-  ``fp`` and ``cs`` -- and repoints each node at the published endpoint, which
-  need not be the one it was tested through. They are configured as a list of
-  variants, and a survivor is published once per variant, so N survivors and
-  I variants make N * I configs in one file.
+* :func:`finalise` runs on the survivors. It adds the eight parameters that
+  were deliberately withheld -- ``fm``, ``dialMode``, ``ech``, ``echOutbound``,
+  ``fp``, ``cs``, ``cp`` and ``esr`` -- and repoints each node at the published
+  endpoint, which need not be the one it was tested through. They are
+  configured as a list of variants, and a survivor is published once per
+  variant, so N survivors and I variants make N * I configs in one file.
 
-The split exists because those six shape *how* the connection is made, not
+The split exists because those eight shape *how* the connection is made, not
 *whether* the node carries traffic. Testing without them measures the node
 itself, over the core's plain TLS, and adding them afterwards is a client-side
 choice that can be retuned without re-testing anything. A node arriving from a
 source carrying its own value for any of them has it removed before the check,
-whatever it said, so no source can smuggle its own fragmentation, dialer, ECH
-or fingerprint into the run.
+whatever it said, so no source can smuggle its own fragmentation, dialer, ECH,
+fingerprint or TLS settings into the run.
 
 Everything published is TLS on port 443. Nodes arriving on a plaintext
 Cloudflare port are converted rather than kept alongside a TLS twin: the ISP
@@ -75,7 +75,7 @@ ALLOWED_SECURITY = ("", "tls", "none")
 ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 
 # --- fields applied AFTER the health check --------------------------------
-# A variant is ten fields put on every survivor. The first names what it
+# A variant is twelve fields put on every survivor. The first names what it
 # publishes:
 #
 #   prefix_name  put at the start of the name of every config the variant
@@ -98,11 +98,11 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 #                tls needs one of Cloudflare's HTTPS ports (PORTS_MAPPED_TO_443),
 #                none one of its HTTP ports (PORTS_MAPPED_TO_8080) -- except on
 #                a loopback ip, where any port is the relay's own. A none
-#                variant cannot carry ech, echOutbound, fp or cs -- they only
-#                exist inside TLS -- and its links drop the node's sni and alpn
-#                for the same reason.
+#                variant cannot carry ech, echOutbound, fp, cs, cp or esr --
+#                they only exist inside TLS -- and its links drop the node's sni
+#                and alpn for the same reason.
 #
-# The other six are share-link parameters that shape *how* a connection is
+# The other eight are share-link parameters that shape *how* a connection is
 # made rather than *whether* a node carries traffic, so the health check runs
 # without any of them -- over the core's plain TLS, to HEALTHCHECK_ADDRESS:
 #
@@ -118,17 +118,30 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 #                (tlsSettings.echSockopt.dialerProxy). It needs an ech beside
 #                it, and a tag that is not empty, "direct" or "block" and does
 #                not start with "proxy" -- both clients refuse anything else.
-#   fp           tlsSettings.fingerprint -- the uTLS ClientHello to imitate
+#   fp           tlsSettings.fingerprint -- the uTLS ClientHello to imitate;
+#                "unsafe" builds it with Go's own crypto/tls instead
 #   cs           tlsSettings.cipherSuites -- colon-separated Go suite names
+#   cp           tlsSettings.curvePreferences -- the key-exchange groups to
+#                offer, comma-separated: X25519MLKEM768, X25519 (the two both
+#                clients offer), CurveP256, CurveP384, CurveP521,
+#                SecP256r1MLKEM768 or SecP384r1MLKEM1024. They only reach the
+#                handshake with fp=unsafe: any other fingerprint, an empty one
+#                included, is uTLS, which the fork hands no curves, so the
+#                fingerprint's own go out -- and both clients refuse to save a
+#                profile so.
+#   esr          tlsSettings.enableSessionResumption -- "1" resumes TLS
+#                sessions from earlier connections, "" does not; the clients
+#                read nothing else as on. Under a uTLS fingerprint it needs the
+#                fork at v26.11.9 or newer, under fp=unsafe any version.
 #
-# They travel together as one list of variants, so the ten can never drift
+# They travel together as one list of variants, so the twelve can never drift
 # out of step. Every healthy node is published once per variant, its variants
 # adjacent, so N healthy nodes and I variants become N * I lines -- still one
 # configs.txt and one configs_base64.txt. With a single variant, which is the
 # default, that is one line per node exactly as before. To publish every node
 # on several addresses, add variants that differ only in ip (and port).
 #
-# For the six parameters, "" publishes that parameter's default: nothing is
+# For the eight parameters, "" publishes that parameter's default: nothing is
 # written for it. ip, port and security always need a value; prefix_name may
 # be "".
 # For dialMode that costs nothing, because an absent dialMode and dialMode=""
@@ -139,8 +152,9 @@ ALLOWED_TRANSPORTS = ("ws", "xhttp", "websocket", "httpupgrade", "grpc")
 # passes over plain TLS is not proven to complete one with this fingerprint and
 # these ciphers. _self_check below and the preflight catch what they can before
 # any testing starts -- fm, echOutbound and fp are validated by the core
-# itself, and ech and cs are checked against what the core accepts, because it
-# silently tolerates both. dialMode is not: the
+# itself, ech, cs and cp are checked against what the core accepts, because it
+# silently tolerates all three, and esr against what the clients read.
+# dialMode is not: the
 # core takes any string at parse time and only rejects one it has no code for
 # when it dials, so a dialMode the deployed core does not implement would ship
 # as a list that fails at connect time. Keep it matched to what that build
@@ -160,10 +174,12 @@ class Variant(NamedTuple):
     ech_outbound: str
     fp: str
     cs: str
+    cp: str
+    esr: str
 
     @property
     def params(self) -> dict[str, str]:
-        """The six share-link parameters stripped before the check and put back
+        """The eight share-link parameters stripped before the check and put back
         after it, under the keys they are written as. Not ip and port, which
         are the link's address, nor security, which overrides a value the
         check itself needs rather than being withheld from it."""
@@ -171,10 +187,10 @@ class Variant(NamedTuple):
 
 
 # Add a variant by adding an entry. Each is (prefix_name, ip, port, fm,
-# dialMode, security, ech, echOutbound, fp, cs): prefix_name, ip and port
-# written plainly, the rest percent-encoded exactly as they will be emitted, ""
-# for any of the six parameters publishing that one's default. Write
-# echOutbound as compact JSON on one line.
+# dialMode, security, ech, echOutbound, fp, cs, cp, esr): prefix_name, ip and
+# port written plainly, the rest percent-encoded exactly as they will be
+# emitted, "" for any of the eight parameters publishing that one's default.
+# Write echOutbound as compact JSON on one line.
 VARIANTS_ENCODED = [
     (
         # prefix_name
@@ -207,6 +223,10 @@ VARIANTS_ENCODED = [
         "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256%3ATLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
         "%3ATLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA%3ATLS_ECDHE_RSA_WITH_AES_256_CBC_SHA%3A"
         "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256%3ATLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+        # cp
+        "",
+        # esr
+        "",
     ),
     # Through an SNI-spoofing relay on the user's own device, listening on
     # 127.0.0.1:40443, without a fragment or a cipher list, imitating
@@ -231,6 +251,10 @@ VARIANTS_ENCODED = [
         # fp
         "chrome",
         # cs
+        "",
+        # cp
+        "",
+        # esr
         "",
     ),
     # On a Cloudflare IPv6 address, imitating Chrome 120's ClientHello,
@@ -261,18 +285,22 @@ VARIANTS_ENCODED = [
         "hellochrome_120",
         # cs
         "",
+        # cp
+        "",
+        # esr
+        "",
     ),
 ]
 
-# The share-link keys of the six parameter fields, in field order: the
+# The share-link keys of the eight parameter fields, in field order: the
 # spelling :func:`apply_deferred_params` writes and both clients read. PattNG
 # looks echOutbound up with an exact-case map key, so the casing here is
 # load-bearing.
-VARIANT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs")
+VARIANT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs", "cp", "esr")
 
 # The Variant field each of those keys is read from -- by name, so the order
 # fields are written in never decides which value lands under which key.
-PARAM_FIELDS = ("fm", "dial_mode", "ech", "ech_outbound", "fp", "cs")
+PARAM_FIELDS = ("fm", "dial_mode", "ech", "ech_outbound", "fp", "cs", "cp", "esr")
 
 # The fields VARIANTS_ENCODED writes plainly, as they are used: the name prefix
 # and the link's own address. Every other field is percent-encoded there,
@@ -281,12 +309,12 @@ PLAIN_FIELDS = ("prefix_name", "ip", "port")
 
 # What a variant may publish, and the fields only TLS can carry.
 SECURITY_VALUES = ("tls", "none")
-TLS_ONLY_FIELDS = ("ech", "ech_outbound", "fp", "cs")
+TLS_ONLY_FIELDS = ("ech", "ech_outbound", "fp", "cs", "cp", "esr")
 # Parameters the pipeline sets on every node that mean nothing without TLS, so
 # a security=none link leaves them out.
 TLS_ONLY_KEYS = ("sni", "alpn")
 
-# The six parameters :func:`finalise` owns, in every spelling. They are removed
+# The eight parameters :func:`finalise` owns, in every spelling. They are removed
 # on the way in and set on the way out, so whatever a source supplied has no
 # influence on either the health check or the published value.
 DEFERRED_KEYS = tuple(key.lower() for key in VARIANT_KEYS)
@@ -348,6 +376,52 @@ def cs_problem(value: str) -> str | None:
         )
     if len(set(names)) != len(names):
         return "names a cipher suite twice"
+    return None
+
+
+# Every curve name the core knows, as ParseCurveName in transport/internet/tls
+# /config.go has them -- it lowercases a name before looking it up. Like a
+# cipher suite, a name it does not know is dropped with nothing but a log line,
+# and a cp of nothing but unknown names silently becomes Go's defaults.
+CURVE_NAMES = frozenset({
+    "curvep256",
+    "curvep384",
+    "curvep521",
+    "x25519",
+    "x25519mlkem768",
+    "secp256r1mlkem768",
+    "secp384r1mlkem1024",
+})
+
+# The one fingerprint with which the fork builds the ClientHello with Go's own
+# crypto/tls. Every other one -- an empty fp included, which is Chrome's -- is
+# uTLS, which the fork hands no curve preferences.
+GO_TLS_FINGERPRINT = "unsafe"
+
+# What both clients read as "resume TLS sessions": "1", and nothing else.
+ESR_ON = "1"
+
+
+def cp_problem(value: str, fp: str) -> str | None:
+    """Why the core would not offer ``value`` as the curves given, under the
+    fingerprint ``fp``, or None."""
+    names = [name.strip() for name in value.split(",")]
+    unknown = [name for name in names if name.lower() not in CURVE_NAMES]
+    if unknown:
+        return (
+            "names curves the core does not know, which it would silently drop:"
+            f" {', '.join(repr(name) for name in unknown)}"
+        )
+    if len({name.lower() for name in names}) != len(names):
+        return "names a curve twice"
+    # The fork lowercases the fingerprint too, and so do the clients' checks.
+    if fp.lower() != GO_TLS_FINGERPRINT:
+        return (
+            f"needs fp={GO_TLS_FINGERPRINT}: under any other fingerprint -- an empty"
+            " one is Chrome's -- uTLS builds the ClientHello and the fork hands it no"
+            " curves, so they would never go out; PattN and PattNG refuse to save"
+            " such a profile"
+        )
     return None
 
 
@@ -486,7 +560,9 @@ def prefix_name_problem(value: str) -> str | None:
 
 
 # The shape of one VARIANTS_ENCODED entry, as messages about it spell it.
-_ENTRY_SHAPE = "(prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs)"
+_ENTRY_SHAPE = (
+    "(prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs, cp, esr)"
+)
 
 
 def _decode_variants(entries: object) -> list[Variant]:
@@ -539,7 +615,7 @@ KEEP_SOURCE_COMMENT = True
 def _self_check() -> None:
     """Fail loudly at import if a tunable above is unusable, rather than
     silently corrupting configs.txt."""
-    # A variant is one entry of ten fields, so they can never drift out of
+    # A variant is one entry of twelve fields, so they can never drift out of
     # step -- but the list itself, and the shape of each entry, are still worth
     # checking here rather than as an IndexError deep inside finalise.
     _decode_variants(VARIANTS_ENCODED)
@@ -599,6 +675,19 @@ def _self_check() -> None:
             problem = cs_problem(variant.cs)
             if problem:
                 raise AssertionError(f"VARIANTS[{index}].cs {problem}")
+        # An unknown curve is dropped as quietly as an unknown cipher suite, and
+        # the core ignores a cp altogether under any fingerprint but unsafe.
+        if variant.cp:
+            problem = cp_problem(variant.cp, variant.fp)
+            if problem:
+                raise AssertionError(f"VARIANTS[{index}].cp {problem}")
+        # Both clients turn session resumption on for "1" alone; "true" or "on"
+        # would publish it off without a word.
+        if variant.esr not in ("", ESR_ON):
+            raise AssertionError(
+                f"VARIANTS[{index}].esr is {variant.esr!r}; it has to be {ESR_ON!r}"
+                " (on) or \"\" (off), the only values PattN and PattNG read"
+            )
 
     # Two identical entries would publish the same link twice, which is the one
     # thing the rest of this pipeline works hardest to avoid -- and so would two
@@ -729,11 +818,11 @@ def rule_11_strip_insecure(node: Node) -> None:
 
 def strip_deferred_params(node: Node) -> None:
     """Remove whatever the source supplied for fm, dialMode, ech, echOutbound,
-    fp or cs.
+    fp, cs, cp or esr.
 
     The health check has to run on nodes carrying none of them, so that what it
     measures is the node rather than one source's idea of how to fragment,
-    dial, hide the SNI, or shape the ClientHello. :func:`apply_deferred_params`
+    dial, hide the SNI, or shape the handshake. :func:`apply_deferred_params`
     puts this project's values on afterwards.
     """
     for key in list(node.params):
@@ -742,10 +831,10 @@ def strip_deferred_params(node: Node) -> None:
 
 
 def apply_deferred_params(node: Node, variant: int = 0) -> None:
-    """Put one variant's fm, dialMode, ech, echOutbound, fp and cs on a node
-    that has already passed.
+    """Put one variant's fm, dialMode, ech, echOutbound, fp, cs, cp and esr on
+    a node that has already passed.
 
-    ``variant`` indexes :data:`VARIANTS`, so the six always travel as the
+    ``variant`` indexes :data:`VARIANTS`, so the eight always travel as the
     entry they were written as, each under the exact key in VARIANT_KEYS.
     The variant's ip and port are rule 10's -- see rule_10_point_at_output.
 
@@ -943,7 +1032,7 @@ def transform(nodes: list[Node], stats: dict | None = None) -> list[Node]:
 
     Every node that comes back is TLS, points at the health-check endpoint,
     names its host as SNI, offers only http/1.1 if it is ws or httpupgrade, and
-    carries none of the six variant fields.
+    carries none of the eight variant parameters.
     """
     counts: dict = stats if stats is not None else {}
 
