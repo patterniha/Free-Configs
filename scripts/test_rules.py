@@ -71,6 +71,7 @@ REFERENCE_VARIANT = transform.Variant(
     ),
     cp="",
     esr="",
+    tut="",
 )
 
 
@@ -312,7 +313,7 @@ check(len(survivor) == 1, "deferred: stripping ech does not drop the node")
 
 for spelling in ("fm", "FM", "Fm", "dialMode", "dialmode", "DIALMODE",
                  "ech", "ECH", "Ech", "echOutbound", "echoutbound", "ECHOUTBOUND",
-                 "cp", "CP", "Cp", "esr", "ESR", "Esr"):
+                 "cp", "CP", "Cp", "esr", "ESR", "Esr", "tut", "TUT", "Tut"):
     tested = one(**{**BASE, spelling: "junk-from-a-source"})
     check(len(tested) == 1, f"deferred: a node carrying {spelling} is not dropped")
     for node in tested:
@@ -330,13 +331,14 @@ for node in transform.finalise(one(**{**BASE, "fm": "junk", "dialMode": "junk"})
 # The invariant the whole split exists for: nothing reaching the health check
 # carries any of the four, whatever it arrived with, and everything reaching
 # it still carries the masking the check is supposed to exercise.
-SOURCE_DEFERRED = {"fm": "x", "dialMode": "x", "ech": "x", "echOutbound": "x", "cp": "x", "esr": "1"}
+SOURCE_DEFERRED = {"fm": "x", "dialMode": "x", "ech": "x", "echOutbound": "x", "cp": "x", "esr": "1",
+                   "tut": "5000"}
 matrix = []
 for security, port in (("tls", "443"), ("none", "8080"), ("tls", "2053"), ("none", "2082")):
     for extra in ({}, {"fm": "x"}, {"dialMode": "x"}, {"ech": "x"}, {"echOutbound": "x"},
-                  {"cp": "X25519"}, {"esr": "1"}, SOURCE_DEFERRED):
+                  {"cp": "X25519"}, {"esr": "1"}, {"tut": "5000"}, SOURCE_DEFERRED):
         matrix.extend(one(**{**BASE, "security": security, "port": port, **extra}))
-check(len(matrix) == 32, "deferred: every combination in the matrix survived the rules")
+check(len(matrix) == 36, "deferred: every combination in the matrix survived the rules")
 check(all(not n.has(key) for n in matrix for key in transform.VARIANT_KEYS),
       "deferred: no node reaches the health check carrying fm, dialMode, ech or echOutbound")
 check(all(not parse_line(n.to_link()).has(key) for n in matrix for key in transform.VARIANT_KEYS),
@@ -535,8 +537,8 @@ try:
     V2 = entry(ip="104.16.0.1", port="2053",
                fm='{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello"}}]}',
                dial_mode="code-1", ech=ECH_DNS, ech_outbound=ECH_OUT, fp="chrome",
-               cs="TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256")
-    V3 = entry(ip="2606:4700::1", port="8080", dial_mode="code-2", security="none")
+               cs="TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256", tut="15000")
+    V3 = entry(ip="2606:4700::1", port="8080", dial_mode="code-2", security="none", tut="30000")
     VARIANTS3 = [transform.Variant(*v) for v in (V1, V2, V3)]
     set_variants(V1, V2, V3)
 
@@ -596,6 +598,45 @@ try:
           .to_outbound("t")["streamSettings"]["tlsSettings"],
           "variants: an esr other than 1 renders no session resumption, as the clients read it")
 
+    # tut, a sockopt beside dialMode -- after it in the link, as both clients
+    # write it -- and a TCP setting, so a copy without TLS carries it too.
+    timed = published[1].to_link()
+    check("&dialMode=code-1&tut=15000&" in timed,
+          "variants: tut is byte-exact in the published link, right after dialMode")
+    check(published[1].to_outbound("t")["streamSettings"]["sockopt"]
+          == {"dialMode": "code-1", "tcpUserTimeout": 15000},
+          "variants: tut renders sockopt.tcpUserTimeout as a number, beside the dialMode")
+    check(published[2].to_outbound("t")["streamSettings"]["sockopt"]
+          == {"dialMode": "code-2", "tcpUserTimeout": 30000},
+          "variants: a copy without TLS carries its tut as well")
+    check(all(not n.has("tut") for n in published[0::3])
+          and "sockopt" not in published[0].to_outbound("t")["streamSettings"],
+          "variants: an empty tut publishes nothing, and no sockopt without a dialMode")
+
+    # Like both clients, a copy whose connection is not TCP -- XHTTP over TLS
+    # offering h3 alone, which the fork dials over QUIC -- publishes no tut.
+    def xhttp(alpn: str) -> list[Node]:
+        return transform.finalise(one(**{**BASE, "type": "xhttp", "host": "x.example", "alpn": alpn}), {})
+
+    quic = xhttp("h3")
+    check(not quic[1].has("tut") and quic[2].get("tut") == "30000",
+          "variants: XHTTP over TLS with h3 alone drops tut; the same node without TLS keeps it")
+    check("tut=" not in quic[1].to_link() and "sockopt" in quic[1].to_outbound("t")["streamSettings"]
+          and "tcpUserTimeout" not in quic[1].to_outbound("t")["streamSettings"]["sockopt"],
+          "variants: and so does its link and its outbound, which keeps the dialMode")
+    check(xhttp("h2,h3")[1].get("tut") == "15000" and xhttp("")[1].get("tut") == "15000",
+          "variants: XHTTP offering more than h3, or no alpn, connects over TCP and keeps tut")
+    check(transform.connects_over_tcp(published[1]) and transform.connects_over_tcp(published[2]),
+          "variants: a WebSocket copy, with or without TLS, connects over TCP")
+    # The rule on its own, as both clients have it: QUIC needs TLS, so XHTTP
+    # without it is TCP whatever its alpn says -- not only because a plaintext
+    # copy loses its alpn first.
+    check(transform.connects_over_tcp(Node("vless", "u", "a", "8080",
+                                           {"security": "none", "type": "xhttp", "alpn": "h3"}))
+          and not transform.connects_over_tcp(Node("vless", "u", "a", "443",
+                                                   {"security": "tls", "type": "xhttp", "alpn": "h3"})),
+          "variants: XHTTP is QUIC with TLS and h3 alone, and TCP without TLS whatever its alpn")
+
     # Variants of one node are the same node: only what a variant sets differs.
     def not_set_by_variant(node: Node) -> dict:
         set_by_variant = set(transform.DEFERRED_KEYS) | {"security"} | set(transform.TLS_ONLY_KEYS)
@@ -613,14 +654,15 @@ try:
     # exact-case map lookup -- so a source's own casing must not survive into
     # the published link, even though it was stripped case-insensitively.
     shouting = one(**{**BASE, "host": "hs.example", "ECH": "x", "ECHOUTBOUND": "y",
-                      "DIALMODE": "z", "FM": "w", "FP": "v", "CS": "u", "CP": "t", "ESR": "s"})
+                      "DIALMODE": "z", "FM": "w", "FP": "v", "CS": "u", "CP": "t", "ESR": "s",
+                      "TUT": "r"})
     # Every copy at once: each key is set by at least one of the variants.
     emitted = " ".join(n.to_link() for n in transform.finalise(shouting, {}))
     # Pinned literally: every other check reads VARIANT_KEYS itself, so a
     # misspelling there would be checked against the misspelling.
-    CLIENT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs", "cp", "esr")
+    CLIENT_KEYS = ("fm", "dialMode", "ech", "echOutbound", "fp", "cs", "cp", "esr", "tut")
     check(transform.VARIANT_KEYS == CLIENT_KEYS,
-          "variants: the eight keys are spelled exactly as PattN and PattNG read them")
+          "variants: the nine keys are spelled exactly as PattN and PattNG read them")
     for key in CLIENT_KEYS:
         check(f"&{key}=" in emitted, f"variants: {key} is emitted under its exact spelling")
     check(not any(f"&{key.upper()}=" in emitted for key in transform.VARIANT_KEYS),
@@ -642,7 +684,7 @@ try:
     transform.finalise(survivors(2), stats)
     check(stats["published"] == 6 and stats["published_variants"] == 3,
           "variants: the counts describe the expansion")
-    check([stats[f"published_with_{key}"] for key in transform.VARIANT_KEYS] == [4, 4, 2, 2, 4, 4, 2, 2],
+    check([stats[f"published_with_{key}"] for key in transform.VARIANT_KEYS] == [4, 4, 2, 2, 4, 4, 2, 2, 4],
           "variants: the counts only count configs that really carry each field")
     check(stats["published_without_tls"] == 2, "variants: plaintext copies are counted")
 
@@ -756,6 +798,15 @@ try:
         ("an esr of true", (entry(esr="true"),), "has to be"),
         ("an esr of 0", (entry(esr="0"),), "has to be"),
         ("none with an esr", (entry(security="none", port="8080", esr="1"),), "inside TLS"),
+        # tut, which both clients read as a whole number of milliseconds above 0 alone
+        ("a tut of 0", (entry(tut="0"),), "from 1 to"),
+        ("a negative tut", (entry(tut="-5"),), "whole number"),
+        ("a tut with a plus sign", (entry(tut="+5"),), "whole number"),
+        ("a tut with a leading zero", (entry(tut="05"),), "whole number"),
+        ("a tut with a unit", (entry(tut="30s"),), "whole number"),
+        ("a tut with a fraction", (entry(tut="1.5"),), "whole number"),
+        ("a tut with a space", (entry(tut=" 500"),), "whole number"),
+        ("a tut past an int32", (entry(tut="2147483648"),), "from 1 to"),
     ):
         set_variants(*entries)
         try:
@@ -796,6 +847,10 @@ try:
         ("a cp under fp=UNSAFE in capitals", (entry(fp="UNSAFE", cp="X25519"),)),
         ("an esr of 1", (entry(esr="1"),)),
         ("an esr under a uTLS fingerprint", (entry(fp="chrome", esr="1"),)),
+        ("a tut of 1", (entry(tut="1"),)),
+        ("a tut of 30000", (entry(tut="30000"),)),
+        ("the largest tut an int32 holds", (entry(tut="2147483647"),)),
+        ("none with a tut, a TCP setting", (entry(security="none", port="8080", tut="30000"),)),
     ]
     for port in transform.PORTS_MAPPED_TO_8080:
         accepted_cases.append((f"none on Cloudflare HTTP port {port}",
@@ -808,7 +863,7 @@ try:
         except AssertionError as error:
             check(False, f"variants: _self_check accepts {label} ({error})")
 
-    # Entries that are not twelve strings at all -- including every shape the
+    # Entries that are not thirteen strings at all -- including every shape the
     # list has had before, so an old entry pasted back in is refused clearly.
     for label, bad in (
         ("an entry of the old two-field shape", ("{}", "")),
@@ -816,8 +871,9 @@ try:
         ("an entry of the old six-field shape", ("{}", "", "", "", "unsafe", "")),
         ("an entry of the old eight-field shape",
          ("188.114.98.0", "443", "{}", "", "", "", "unsafe", "")),
-        ("an entry of the old nine-field shape, without a prefix_name", entry()[1:-2]),
-        ("an entry of the old ten-field shape, without cp and esr", entry()[:-2]),
+        ("an entry of the old nine-field shape, without a prefix_name", entry()[1:-3]),
+        ("an entry of the old ten-field shape, without cp, esr and tut", entry()[:-3]),
+        ("an entry of the old twelve-field shape, without tut", entry()[:-1]),
         ("an entry with a field that is not a string", entry()[:5] + (None,) + entry()[6:]),
         ("an entry with a port that is not a string",
          tuple(443 if field == "port" else value
@@ -829,7 +885,7 @@ try:
             check(False, f"variants: _self_check rejects {label}")
         except AssertionError as error:
             check("not a (prefix_name, ip, port, fm, dialMode, security, ech, echOutbound, fp, cs,"
-                  " cp, esr) entry" in str(error), f"variants: _self_check rejects {label}")
+                  " cp, esr, tut) entry" in str(error), f"variants: _self_check rejects {label}")
 finally:
     transform.VARIANTS, transform.VARIANTS_ENCODED = real_variants, real_variants_encoded
 
@@ -1093,6 +1149,7 @@ for label, overrides in (
     ("ech and echOutbound", dict(VARIANTS=[transform.VARIANTS[0]._replace(
         ech="x+https://1.1.1.1/dns-query", ech_outbound='{"tag": "ech-out", "protocol": "freedom"}')])),
     ("cp and esr", dict(VARIANTS=[transform.VARIANTS[0]._replace(cp="X25519MLKEM768,X25519", esr="1")])),
+    ("tut", dict(VARIANTS=[transform.VARIANTS[0]._replace(tut="30000")])),
 ):
     check(_name_under(**overrides) == baseline_name,
           f"naming: changing {label} does not rename nodes")
@@ -1836,7 +1893,7 @@ try:
                                  fm='{"tcp": [{"type": "fragment", "settings": {}}]}',
                                  dial_mode="code-1", ech="x+https://1.1.1.1/dns-query",
                                  ech_outbound='{"tag": "ech-out", "protocol": "freedom"}',
-                                 fp="chrome", cs="TLS_AES_128_GCM_SHA256")),
+                                 fp="chrome", cs="TLS_AES_128_GCM_SHA256", tut="15000")),
         transform.Variant(*entry(ip="2606:4700::1", port="8080", dial_mode="code-2",
                                  security="none")),
     ]
@@ -1890,6 +1947,13 @@ try:
     check("cp X25519MLKEM768,X25519 + esr" in many[1][0]
           and "cp " not in many[2][0] and "esr" not in many[2][0],
           "healthcheck: a probe's description names its curves and session resumption")
+    check([node.get("tut") for _, node in many[1:]] == [variant.tut for variant in transform.VARIANTS],
+          "healthcheck: each published probe carries its own variant's tut")
+    check("dialMode code-1 + tut 15000" in many[2][0] and "tut" not in many[1][0],
+          "healthcheck: a probe's description names its tcpUserTimeout, after its dialMode")
+    check(many[2][1].to_outbound("t")["streamSettings"]["sockopt"]
+          == {"dialMode": "code-1", "tcpUserTimeout": 15000},
+          "healthcheck: the probe hands the core the tcpUserTimeout it will publish")
     check([(node.address, node.port) for _, node in many[1:]]
           == [(variant.ip, variant.port) for variant in transform.VARIANTS],
           "healthcheck: each published probe points at its own variant's endpoint")

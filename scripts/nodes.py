@@ -47,6 +47,7 @@ PARAM_ORDER = (
     "esr",
     "fm",
     "dialMode",
+    "tut",
     "ech",
     "echOutbound",
     "flow",
@@ -226,12 +227,13 @@ class Node:
 
         Mirrors whatever the node carries, including the share-link extensions
         ``fp`` (fingerprint), ``cs`` (cipherSuites), ``cp`` (curvePreferences),
-        ``esr`` (enableSessionResumption), ``fm`` (finalmask), ``dialMode`` (a
-        sockopt), ``ech`` (echConfigList) and ``echOutbound`` (the echSockopt
-        dialer). Which are present depends on the stage: the health check runs
-        on nodes carrying none of the eight, over the core's plain TLS, and
-        transform.finalise adds them to the survivors. See scripts/transform.py
-        for why the pipeline is split that way.
+        ``esr`` (enableSessionResumption), ``fm`` (finalmask), ``dialMode`` and
+        ``tut`` (tcpUserTimeout, both sockopts), ``ech`` (echConfigList) and
+        ``echOutbound`` (the echSockopt dialer). Which are present depends on
+        the stage: the health check runs on nodes carrying none of the nine,
+        over the core's plain TLS, and transform.finalise adds them to the
+        survivors. See scripts/transform.py for why the pipeline is split that
+        way.
         """
         net = self.transport
         stream: dict = {"network": "ws" if net in WS_ALIASES else net}
@@ -291,12 +293,19 @@ class Node:
             # a hard failure rather than emitting configs Xray would reject.
             stream["finalmask"] = json.loads(self.get("fm"))
 
+        sockopt: dict = {}
         if self.get("dialMode"):
             # A fork-only sockopt (streamSettings.sockopt.dialMode) selecting
             # which dialing code the core runs. Passed through as-is: the core
             # accepts any string here at parse time and only rejects one it has
             # no implementation for when it dials.
-            stream["sockopt"] = {"dialMode": self.get("dialMode")}
+            sockopt["dialMode"] = self.get("dialMode")
+        if self.get("tut"):
+            # tcpUserTimeout, a whole number of milliseconds in an int32 field.
+            # Raises if the value is not one; transform._self_check sees to it.
+            sockopt["tcpUserTimeout"] = int(self.get("tut"))
+        if sockopt:
+            stream["sockopt"] = sockopt
 
         port = int(self.port)
         if self.scheme == "vless":

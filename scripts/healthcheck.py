@@ -5,12 +5,12 @@ Reimplements the criterion the upstream project publishes in its own header --
 ALL 3 independent runs" -- directly against Xray-core rather than a wrapper.
 
 The nodes reaching this stage deliberately carry none of ``fm``, ``dialMode``,
-``ech``, ``echOutbound``, ``fp``, ``cs``, ``cp`` or ``esr``: those shape how a
-connection is made rather than whether the node works, so the check runs over
-the core's plain TLS and transform.finalise adds them to the survivors
-afterwards. :func:`preflight` therefore validates every published shape as well
-as the tested one, because nothing else in the pipeline ever hands those eight
-to the core.
+``ech``, ``echOutbound``, ``fp``, ``cs``, ``cp``, ``esr`` or ``tut``: those
+shape how a connection is made rather than whether the node works, so the check
+runs over the core's plain TLS and transform.finalise adds them to the
+survivors afterwards. :func:`preflight` therefore validates every published
+shape as well as the tested one, because nothing else in the pipeline ever
+hands those nine to the core.
 
 Shape of a round: nodes are grouped into batches; each batch becomes one Xray
 process with one loopback HTTP inbound per node, routed to that node's outbound.
@@ -316,7 +316,7 @@ def preflight_probes() -> list[tuple[str, Node]]:
     what the subscription publishes.
 
     They differ, so both are worth proving. The tested shape is plain TLS;
-    each published shape adds one variant's eight parameters on top and points
+    each published shape adds one variant's nine parameters on top and points
     at that variant's ip and port. Every variant gets its own probe, because an unusable
     ``fm``, ``echOutbound`` or ``fp`` would otherwise reach configs.txt
     unchallenged -- the health check never sees any of them.
@@ -360,6 +360,8 @@ def preflight_probes() -> list[tuple[str, Node]]:
         carries = [variant.security, _fm_label(variant.fm)]
         if variant.dial_mode:
             carries.append(f"dialMode {variant.dial_mode}")
+        if variant.tut:
+            carries.append(f"tut {variant.tut}")
         if variant.ech:
             carries.append("ech")
         if variant.ech_outbound:
