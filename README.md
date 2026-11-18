@@ -73,6 +73,8 @@ https://github.com/peasoft/NoMoreWalls
 
 https://github.com/HnCgs/HomayounConfigs
 
+https://github.com/igareck/vpn-configs-for-russia
+
 
 ## حمایت
 
