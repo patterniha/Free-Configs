@@ -75,6 +75,8 @@ https://github.com/HnCgs/HomayounConfigs
 
 https://github.com/igareck/vpn-configs-for-russia
 
+https://github.com/SoliSpirit/v2ray-configs
+
 
 ## حمایت
 
